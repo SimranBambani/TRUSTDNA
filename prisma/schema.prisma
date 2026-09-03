@@ -1,0 +1,809 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// TrustDNA — Prisma Schema
+// Database: PostgreSQL 16
+// ORM: Prisma 5.x
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_DATABASE_URL")
+  extensions = [uuidOssp(map: "uuid-ossp"), pgcrypto]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  USER
+  ORG_ADMIN
+  PLATFORM_ADMIN
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum OrgStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum OrgVerificationStatus {
+  UNVERIFIED
+  VERIFIED
+  REJECTED
+}
+
+enum OrgMemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VERIFIER
+  VIEWER
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum CredentialStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+  SUSPENDED
+}
+
+enum VerificationStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum KycProvider {
+  INTERNAL
+  ONFIDO
+  JUMIO
+  PERSONA
+}
+
+enum DocumentType {
+  PASSPORT
+  NATIONAL_ID
+  DRIVERS_LICENSE
+  PROOF_OF_ADDRESS
+  SELFIE
+  BIOMETRIC
+}
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  VERIFIED
+  REJECTED
+}
+
+enum TrustTier {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+enum TrustEventType {
+  KYC_VERIFIED
+  KYC_EXPIRED
+  KYC_REJECTED
+  KYC_RESUBMITTED
+  CREDENTIAL_ISSUED
+  CREDENTIAL_REVOKED
+  CREDENTIAL_EXPIRED
+  EMAIL_VERIFIED
+  PHONE_VERIFIED
+  MFA_ENABLED
+  MFA_DISABLED
+  ORG_VERIFIED
+  LOGIN_SUCCESS
+  LOGIN_ANOMALY
+  PASSWORD_CHANGED
+  FRAUD_FLAG_CONFIRMED
+  FRAUD_FLAG_DISMISSED
+  PEER_ENDORSEMENT
+  INACTIVITY_DECAY
+  SCORE_OVERRIDE
+  ACCOUNT_RECOVERED
+}
+
+enum TrustEventCategory {
+  IDENTITY
+  CREDENTIAL
+  BEHAVIOR
+  FRAUD
+  SOCIAL
+}
+
+enum NotificationType {
+  EMAIL
+  IN_APP
+  WEBHOOK
+  SMS
+}
+
+enum NotificationCategory {
+  SECURITY
+  TRUST
+  CREDENTIAL
+  SYSTEM
+  MARKETING
+}
+
+enum NotificationPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+  READ
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email            String     @unique @db.VarChar(320)
+  passwordHash     String     @db.VarChar(255)
+  firstName        String     @db.VarChar(100)
+  lastName         String     @db.VarChar(100)
+  avatarUrl        String?    @db.VarChar(2048)
+  role             UserRole   @default(USER)
+  status           UserStatus @default(PENDING)
+
+  // Password Reset
+  resetToken       String?    @db.VarChar(255)
+  resetTokenExpires DateTime?
+
+  // Contact
+  phone            String?    @db.VarChar(20)
+  phoneVerified    Boolean    @default(false)
+  emailVerified    Boolean    @default(false)
+  emailVerifyToken String?    @db.VarChar(255)
+  emailVerifyExpires DateTime?
+
+  // MFA
+  mfaEnabled       Boolean    @default(false)
+  // AES-256-GCM encrypted TOTP secret; never store the base32 secret directly.
+  mfaSecret        String?    @db.VarChar(255)
+  // SHA-256 hashes of single-use recovery codes.
+  mfaBackupCodes   String[]   @db.VarChar(128)
+
+  // Soft delete & timestamps
+  deletedAt        DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  // Relations
+  ownedOrganizations    Organization[]        @relation("OrgOwner")
+  memberships           OrgMembership[]
+  heldCredentials       Credential[]          @relation("CredentialSubject")
+  issuedCredentials     Credential[]          @relation("CredentialIssuer")
+  revokedCredentials    Credential[]          @relation("CredentialRevoker")
+  submittedRequests     VerificationRequest[] @relation("Requester")
+  subjectRequests       VerificationRequest[] @relation("Subject")
+  reviewedRequests      VerificationRequest[] @relation("Reviewer")
+  trustScore            TrustScore?           @relation("UserTrustScore")
+  trustEvents           TrustEvent[]
+  kycVerifications      KYCVerification[]
+  kycAuditLogs          KYCAuditLog[]
+  sessions              Session[]
+  mfaChallenges         MfaChallenge[]
+  auditLogs             AuditLog[]            @relation("AuditActor")
+  notifications         Notification[]
+
+  @@index([email])
+  @@index([status])
+  @@index([role])
+  @@index([deletedAt])
+  @@index([createdAt])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ORGANIZATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Organization {
+  id                  String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerId             String                @db.Uuid
+  name                String                @db.VarChar(255)
+  slug                String                @unique @db.VarChar(100)
+  domain              String?               @db.VarChar(253)
+  logoUrl             String?               @db.VarChar(2048)
+  website             String?               @db.VarChar(2048)
+  description         String?               @db.Text
+  status              OrgStatus             @default(PENDING)
+  verificationStatus  OrgVerificationStatus @default(UNVERIFIED)
+  memberCount         Int                   @default(0)
+  verifiedAt          DateTime?
+
+  // Soft delete & timestamps
+  deletedAt           DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  // Relations
+  owner               User                  @relation("OrgOwner", fields: [ownerId], references: [id])
+  memberships         OrgMembership[]
+  issuedCredentials   Credential[]
+  verificationRequests VerificationRequest[]
+  trustScore          TrustScore?           @relation("OrgTrustScore")
+  trustEvents         TrustEvent[]
+  auditLogs           AuditLog[]
+  notifications       Notification[]
+  apiKeys             ApiKey[]
+
+  @@index([ownerId])
+  @@index([slug])
+  @@index([status])
+  @@index([verificationStatus])
+  @@index([deletedAt])
+  @@index([createdAt])
+  @@map("organizations")
+}
+
+model ApiKey {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String       @db.Uuid
+  name           String       @db.VarChar(255)
+  keyPrefix      String       @db.VarChar(32)
+  keyHash        String       @unique @db.Char(64)
+  scopes         String[]     @default([])
+  createdAt      DateTime     @default(now())
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  status         ApiKeyStatus @default(ACTIVE)
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([keyPrefix])
+  @@index([expiresAt])
+  @@map("api_keys")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ORG MEMBERSHIPS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model OrgMembership {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String        @db.Uuid
+  userId         String        @db.Uuid
+  role           OrgMemberRole @default(MEMBER)
+  isActive       Boolean       @default(true)
+  joinedAt       DateTime      @default(now())
+  leftAt         DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@index([organizationId])
+  @@index([role])
+  @@index([isActive])
+  @@map("org_memberships")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CREDENTIALS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Credential {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  issuerId         String           @db.Uuid
+  subjectUserId    String           @db.Uuid
+  organizationId   String           @db.Uuid
+  credentialType   String           @db.VarChar(100)
+  schemaVersion    String           @db.VarChar(20)
+  claims           Json             @db.JsonB
+  signedJwt        String           @db.Text
+  publicKeyId      String           @db.VarChar(255)
+  status           CredentialStatus @default(ACTIVE)
+  revocationReason String?          @db.VarChar(500)
+  revokedById      String?          @db.Uuid
+
+  issuedAt         DateTime         @default(now())
+  expiresAt        DateTime?
+  revokedAt        DateTime?
+  deletedAt        DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  issuer           User             @relation("CredentialIssuer",  fields: [issuerId],       references: [id])
+  subject          User             @relation("CredentialSubject",  fields: [subjectUserId],   references: [id])
+  organization     Organization     @relation(                      fields: [organizationId],  references: [id])
+  revokedBy        User?            @relation("CredentialRevoker",  fields: [revokedById],     references: [id])
+
+  @@index([subjectUserId, status])
+  @@index([issuerId])
+  @@index([organizationId])
+  @@index([credentialType])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([deletedAt])
+  @@map("credentials")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VERIFICATION REQUESTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model VerificationRequest {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  requesterId       String             @db.Uuid
+  subjectUserId     String             @db.Uuid
+  organizationId    String?            @db.Uuid
+  requestType       String             @db.VarChar(100)
+  status            VerificationStatus @default(PENDING)
+  kycProvider       KycProvider        @default(INTERNAL)
+  externalSessionId String?            @db.VarChar(255)
+  externalRef       String?            @db.VarChar(500)
+  submittedData     Json?              @db.JsonB
+  reviewerNotes     Json?              @db.JsonB
+  reviewedById      String?            @db.Uuid
+  attemptNumber     Int                @default(1)
+
+  submittedAt       DateTime           @default(now())
+  reviewedAt        DateTime?
+  expiresAt         DateTime?
+  deletedAt         DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  requester         User               @relation("Requester", fields: [requesterId],    references: [id])
+  subject           User               @relation("Subject",   fields: [subjectUserId],  references: [id])
+  organization      Organization?      @relation(            fields: [organizationId], references: [id])
+  reviewedBy        User?              @relation("Reviewer",  fields: [reviewedById],   references: [id])
+  documents         VerificationDocument[]
+
+  @@index([subjectUserId, status])
+  @@index([requesterId])
+  @@index([organizationId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([deletedAt])
+  @@map("verification_requests")
+}
+
+model VerificationDocument {
+  id                    String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  verificationRequestId String               @db.Uuid
+  docType               DocumentType
+  storagePath           String               @db.VarChar(2048)
+  storageProvider       String               @db.VarChar(50)
+  mimeType              String               @db.VarChar(127)
+  fileSizeBytes         Int
+  status                DocumentStatus       @default(UPLOADED)
+  extractedData         Json?                @db.JsonB
+  confidenceScore       Float?
+  processedAt           DateTime?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+
+  verificationRequest   VerificationRequest  @relation(fields: [verificationRequestId], references: [id], onDelete: Cascade)
+
+  @@index([verificationRequestId])
+  @@index([status])
+  @@map("verification_documents")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRUST SCORES
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TrustScore {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String?       @unique @db.Uuid
+  organizationId   String?       @unique @db.Uuid
+  score            Int           @default(0)
+  tier             TrustTier     @default(BRONZE)
+  identityScore    Int           @default(0)
+  behaviorScore    Int           @default(0)
+  credentialScore  Int           @default(0)
+  fraudPenalty     Int           @default(0)
+  lastCalculatedAt DateTime      @default(now())
+  nextDecayAt      DateTime?
+  version          Int           @default(1)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  user             User?         @relation("UserTrustScore", fields: [userId],         references: [id])
+  organization     Organization? @relation("OrgTrustScore",  fields: [organizationId], references: [id])
+
+  @@index([score])
+  @@index([tier])
+  @@index([nextDecayAt])
+  @@map("trust_scores")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRUST EVENTS (append-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TrustEvent {
+  id               String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String?            @db.Uuid
+  organizationId   String?            @db.Uuid
+  eventType        TrustEventType
+  category         TrustEventCategory
+  scoreDelta       Int
+  decayRate        Float              @default(0.001)
+  reason           String             @db.VarChar(500)
+  description      String?            @db.Text
+  sourceEntityId   String?            @db.Uuid
+  sourceEntityType String?            @db.VarChar(100)
+  metadata         Json?              @db.JsonB
+  isProcessed      Boolean            @default(false)
+  occurredAt       DateTime           @default(now())
+  expiresAt        DateTime?
+  createdAt        DateTime           @default(now())
+
+  user             User?              @relation(fields: [userId],         references: [id])
+  organization     Organization?      @relation(fields: [organizationId], references: [id])
+
+  @@index([userId, occurredAt(sort: Desc)])
+  @@index([organizationId, occurredAt(sort: Desc)])
+  @@index([eventType])
+  @@index([category])
+  @@index([isProcessed])
+  @@index([occurredAt])
+  @@index([expiresAt])
+  @@map("trust_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Session {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String    @db.Uuid
+  tokenHash         String    @unique @db.VarChar(255)
+  deviceFingerprint String?   @db.VarChar(255)
+  deviceName        String?   @db.VarChar(255)
+  browser           String?   @db.VarChar(100)
+  os                String?   @db.VarChar(100)
+  ipAddress         String?   @db.VarChar(45)
+  country           String?   @db.VarChar(2)
+  city              String?   @db.VarChar(100)
+  isMfaVerified     Boolean   @default(false)
+  isActive          Boolean   @default(true)
+  lastActivityAt    DateTime  @default(now())
+  expiresAt         DateTime
+  revokedAt         DateTime?
+  revocationReason  String?   @db.VarChar(255)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  auditLogs         AuditLog[]
+
+  @@index([userId, isActive])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@index([isActive])
+  @@map("sessions")
+}
+
+model MfaChallenge {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String   @db.Uuid
+  tokenHash  String   @unique @db.VarChar(64)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+  @@map("mfa_challenges")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIT LOGS (append-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorId        String?   @db.Uuid
+  organizationId String?   @db.Uuid
+  sessionId      String?   @db.Uuid
+  action         String    @db.VarChar(100)
+  resource       String    @db.VarChar(100)
+  resourceId     String?   @db.Uuid
+  oldValue       Json?     @db.JsonB
+  newValue       Json?     @db.JsonB
+  metadata       Json?     @db.JsonB
+  ipAddress      String?   @db.VarChar(45)
+  userAgent      String?   @db.VarChar(500)
+  requestId      String?   @db.VarChar(255)
+  isSuccess      Boolean   @default(true)
+  errorMessage   String?   @db.VarChar(1000)
+  durationMs     Int?
+  timestamp      DateTime  @default(now())
+
+  actor          User?         @relation("AuditActor", fields: [actorId],        references: [id])
+  organization   Organization? @relation(             fields: [organizationId], references: [id])
+  session        Session?      @relation(             fields: [sessionId],      references: [id])
+
+  @@index([actorId, timestamp(sort: Desc)])
+  @@index([organizationId, timestamp(sort: Desc)])
+  @@index([resource, resourceId])
+  @@index([action])
+  @@index([timestamp(sort: Desc)])
+  @@index([sessionId])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id             String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String               @db.Uuid
+  organizationId String?              @db.Uuid
+  type           NotificationType
+  category       NotificationCategory
+  title          String               @db.VarChar(255)
+  body           String               @db.Text
+  data           Json?                @db.JsonB
+  priority       NotificationPriority @default(MEDIUM)
+  status         NotificationStatus   @default(PENDING)
+  externalId     String?              @db.VarChar(255)
+  retryCount     Int                  @default(0)
+  failureReason  String?              @db.VarChar(500)
+  readAt         DateTime?
+  sentAt         DateTime?
+  scheduledAt    DateTime?
+  deletedAt      DateTime?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  user           User                 @relation(fields: [userId],         references: [id], onDelete: Cascade)
+  organization   Organization?        @relation(fields: [organizationId], references: [id])
+
+  @@index([userId, status])
+  @@index([userId, readAt])
+  @@index([status])
+  @@index([priority])
+  @@index([scheduledAt])
+  @@index([deletedAt])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTOMATED KYC & IDENTITY VERIFICATION MODULE
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum KYCStatus {
+  NOT_STARTED
+  KYC_STARTED
+  PERSONAL_INFO_COMPLETED
+  DOCUMENT_UPLOADED
+  DOCUMENT_PROCESSING
+  LIVENESS_PENDING
+  VERIFICATION_IN_PROGRESS
+  VERIFIED
+  REJECTED
+  NEEDS_MANUAL_REVIEW
+  EXPIRED
+}
+
+enum KYCRiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum KYCDocumentType {
+  PASSPORT
+  NATIONAL_ID
+  DRIVERS_LICENSE
+}
+
+enum KYCScanStatus {
+  PENDING
+  SECURITY_SCAN_PASSED
+  SECURITY_SCAN_FAILED
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum KYCDecision {
+  VERIFIED
+  REJECTED
+  NEEDS_MANUAL_REVIEW
+  PENDING
+}
+
+model KYCVerification {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String           @db.Uuid
+  status         KYCStatus        @default(NOT_STARTED)
+  currentStep    Int              @default(1)
+  provider       String           @db.VarChar(50)
+  providerSessionId String?       @db.VarChar(255)
+  decision       KYCDecision      @default(PENDING)
+  riskScore      Float?
+  riskLevel      KYCRiskLevel?
+  decisionReason String?          @db.VarChar(1000)
+  startedAt      DateTime         @default(now())
+  completedAt    DateTime?
+  expiresAt      DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  personalIdentity PersonalIdentity?
+  documents      KYCDocument[]
+  livenessSessions LivenessSession[]
+  riskEngine     KYCRiskEngine?
+  auditLogs      KYCAuditLog[]
+
+  @@index([userId, status])
+  @@index([status])
+  @@index([decision])
+  @@index([riskLevel])
+  @@map("kyc_verifications")
+}
+
+model KYCWebhookEvent {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider          String   @db.VarChar(50)
+  providerEventId   String   @db.VarChar(255)
+  receivedAt        DateTime @default(now())
+
+  @@unique([provider, providerEventId])
+  @@index([receivedAt])
+  @@map("kyc_webhook_events")
+}
+
+model PersonalIdentity {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kycVerificationId String          @unique @db.Uuid
+  firstName         String          @db.VarChar(100)
+  lastName          String          @db.VarChar(100)
+  dateOfBirth       DateTime
+  nationality       String          @db.VarChar(3)
+  countryOfResidence String         @db.VarChar(3)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  kycVerification   KYCVerification @relation(fields: [kycVerificationId], references: [id], onDelete: Cascade)
+
+  @@map("kyc_personal_identities")
+}
+
+model KYCDocument {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kycVerificationId String          @db.Uuid
+  docType           KYCDocumentType
+  storagePath       String          @db.VarChar(512)
+  storageProvider   String          @default("PRIVATE_STORAGE") @db.VarChar(50)
+  fileHash          String          @db.VarChar(64)
+  mimeType          String          @db.VarChar(100)
+  fileSizeBytes     Int
+  magicBytesVerified Boolean        @default(false)
+  scanStatus        KYCScanStatus   @default(PENDING)
+  ocrData           Json?           @db.JsonB
+  mrzData           Json?           @db.JsonB
+  expiryDate        DateTime?
+  issuingCountry    String?         @db.VarChar(3)
+  isExpired         Boolean         @default(false)
+  authenticityScore Float?
+  processedAt       DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  kycVerification   KYCVerification @relation(fields: [kycVerificationId], references: [id], onDelete: Cascade)
+
+  @@index([kycVerificationId])
+  @@index([scanStatus])
+  @@map("kyc_documents")
+}
+
+model LivenessSession {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kycVerificationId String          @db.Uuid
+  sessionToken      String          @unique @db.VarChar(255)
+  providerSessionId String?         @db.VarChar(255)
+  status            String          @default("PENDING") @db.VarChar(50)
+  livenessPassed    Boolean         @default(false)
+  livenessScore     Float?
+  faceMatchPassed   Boolean         @default(false)
+  faceMatchScore    Float?
+  rawProviderResult Json?           @db.JsonB
+  expiresAt         DateTime
+  completedAt       DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  kycVerification   KYCVerification @relation(fields: [kycVerificationId], references: [id], onDelete: Cascade)
+
+  @@index([kycVerificationId])
+  @@index([sessionToken])
+  @@map("kyc_liveness_sessions")
+}
+
+model KYCRiskEngine {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kycVerificationId String          @unique @db.Uuid
+  riskScore         Float           // 0 (lowest risk) to 100 (highest risk)
+  riskLevel         KYCRiskLevel
+  nameMatchScore    Float
+  dobMatchScore     Float
+  docAuthenticityScore Float
+  faceMatchScore    Float
+  livenessPassed    Boolean
+  ipRiskScore       Float           @default(0)
+  velocityRiskScore Float           @default(0)
+  signals           Json            @db.JsonB // Array of triggered risk signal objects
+  evaluatedAt       DateTime        @default(now())
+
+  kycVerification   KYCVerification @relation(fields: [kycVerificationId], references: [id], onDelete: Cascade)
+
+  @@index([riskScore])
+  @@index([riskLevel])
+  @@map("kyc_risk_engine")
+}
+
+model KYCAuditLog {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kycVerificationId String          @db.Uuid
+  userId            String          @db.Uuid
+  event             String          @db.VarChar(100)
+  outcome           String          @db.VarChar(50)
+  metadata          Json?           @db.JsonB
+  ipAddress         String?         @db.VarChar(45)
+  userAgent         String?         @db.VarChar(500)
+  timestamp         DateTime        @default(now())
+
+  kycVerification   KYCVerification @relation(fields: [kycVerificationId], references: [id], onDelete: Cascade)
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([kycVerificationId, timestamp(sort: Desc)])
+  @@index([userId, timestamp(sort: Desc)])
+  @@index([event])
+  @@map("kyc_audit_logs")
+}
