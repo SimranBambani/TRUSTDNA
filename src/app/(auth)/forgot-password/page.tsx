@@ -2,12 +2,11 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { ShieldCheck, Mail, ArrowRight, ArrowLeft, AlertCircle, Loader2, KeyRound } from "lucide-react";
+import { ShieldCheck, Mail, ArrowRight, ArrowLeft, AlertCircle, Loader2 } from "lucide-react";
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
   const [submitted, setSubmitted] = useState(false);
-  const [resetToken, setResetToken] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -40,9 +39,6 @@ export default function ForgotPasswordPage() {
         return;
       }
 
-      if (json.resetToken) {
-        setResetToken(json.resetToken);
-      }
       setSubmitted(true);
     } catch {
       setError("Network error. Please try again.");
@@ -111,25 +107,9 @@ export default function ForgotPasswordPage() {
           <div className="rounded-2xl border border-emerald-500/20 bg-emerald-950/20 p-5 text-center space-y-2">
             <h4 className="text-sm font-bold text-emerald-300">Password Reset Requested!</h4>
             <p className="text-xs text-slate-300">
-              If an account with <strong className="text-white">{email}</strong> exists, reset instructions have been dispatched.
+              If an account with <strong className="text-white">{email}</strong> exists, password reset instructions will be sent to that address.
             </p>
           </div>
-
-          {resetToken && (
-            <div className="rounded-2xl border border-brand-500/30 bg-brand-950/30 p-4 space-y-2">
-              <div className="flex items-center gap-2 text-brand-300 text-xs font-bold">
-                <KeyRound className="h-4 w-4" />
-                <span>Development Reset Link</span>
-              </div>
-              <p className="text-xs text-slate-400">Click below to proceed directly to reset password:</p>
-              <Link
-                href={`/reset-password?token=${resetToken}`}
-                className="block w-full text-center rounded-xl bg-brand-600 py-2 text-xs font-bold text-white hover:bg-brand-500 transition-colors"
-              >
-                Reset Password Now →
-              </Link>
-            </div>
-          )}
         </div>
       )}
 

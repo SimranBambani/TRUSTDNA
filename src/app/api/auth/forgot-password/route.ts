@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { AuthService } from "@/server/services/auth.service";
+import { EmailService } from "@/server/services/email.service";
 import { forgotPasswordSchema } from "@/lib/validations";
 import { rateLimit } from "@/lib/rate-limit";
 
@@ -11,6 +12,13 @@ export async function POST(req: NextRequest) {
     return limit.response;
   }
 
+  if (!EmailService.isConfigured()) {
+    return NextResponse.json(
+      { error: "Password reset email is not configured. Please contact the site administrator." },
+      { status: 503 },
+    );
+  }
+
   try {
     const body = await req.json();
     const validated = forgotPasswordSchema.parse(body);
@@ -18,11 +26,10 @@ export async function POST(req: NextRequest) {
     const ipAddress = req.headers.get("x-forwarded-for") || "127.0.0.1";
     const userAgent = req.headers.get("user-agent") || undefined;
 
-    const result = await AuthService.requestPasswordReset(validated.email, ipAddress, userAgent);
+    await AuthService.requestPasswordReset(validated.email, ipAddress, userAgent);
 
     return NextResponse.json({
-      message: "If an account exists with this email, instructions to reset your password have been generated.",
-      resetToken: process.env.NODE_ENV === "development" && process.env.ALLOW_DEV_AUTH_TOKENS === "true" ? result.resetToken : undefined,
+      message: "If an account exists with this email, password reset instructions will be sent shortly.",
     }, { status: 200 });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Request failed";

@@ -20,6 +20,9 @@
 | `DIRECT_DATABASE_URL` | Migration | Direct migration connection when needed. |
 | `JWT_SECRET` | Yes | Session JWT signing secret. |
 | `ENCRYPTION_KEY` | Yes | 64-hex-character AES-256 field encryption key. |
+| `RESEND_API_KEY` | Password reset email | Resend API key used to deliver password reset links. |
+| `EMAIL_FROM` | Password reset email | Sender address verified with Resend. |
+| `EMAIL_REPLY_TO` | Optional | Reply-to address for email messages. |
 | `KYC_PROVIDER` | Production | `ONFIDO` or `PERSONA`. |
 | Selected provider variables | Production | API key/token, webhook secret, and base URL. |
 | `VC_ISSUER_PRIVATE_KEY` | Production | Ed25519 PKCS#8 private key. |

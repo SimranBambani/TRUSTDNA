@@ -6,7 +6,8 @@ import { generateAccessToken, generateMfaChallenge, generateRefreshToken, verify
 import { hashToken } from "@/lib/crypto";
 import { AuditService } from "./audit.service";
 import { TrustService } from "./trust.service";
-import { logSecurityEvent } from "@/lib/logger";
+import { logger, logSecurityEvent } from "@/lib/logger";
+import { EmailService } from "./email.service";
 import type { RegisterInput, LoginInput } from "@/lib/validations";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,8 +413,8 @@ export const AuthService = {
     return { user: { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName, role: user.role, status: user.status, trustTier: user.trustScore?.tier || "BRONZE" }, accessToken, refreshToken };
   },
 
-  /** Generate secure password reset token (valid 1 hour) */
-  async requestPasswordReset(email: string, ipAddress?: string, userAgent?: string): Promise<{ resetToken?: string }> {
+  /** Generate a secure, single-use password reset token (valid for 30 minutes). */
+  async requestPasswordReset(email: string, ipAddress?: string, userAgent?: string): Promise<void> {
     const emailLower = email.toLowerCase().trim();
 
     const user = await prisma.user.findUnique({
@@ -422,7 +423,7 @@ export const AuthService = {
 
     // Don't leak whether user exists to prevent account enumeration
     if (!user || user.deletedAt) {
-      return {};
+      return;
     }
 
     // Generate cryptographically secure random token (32 bytes hex)
@@ -437,6 +438,20 @@ export const AuthService = {
         resetTokenExpires: expiresAt,
       },
     });
+
+    const resetUrl = new URL("/reset-password", process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000");
+    resetUrl.searchParams.set("token", rawResetToken);
+
+    try {
+      await EmailService.sendPasswordResetEmail({ email: user.email, resetUrl: resetUrl.toString() });
+    } catch (error) {
+      await prisma.user.updateMany({
+        where: { id: user.id, resetToken: hashedResetToken },
+        data: { resetToken: null, resetTokenExpires: null },
+      });
+      logger.error({ err: error, action: "PASSWORD_RESET_EMAIL_DELIVERY_FAILED" });
+      return;
+    }
 
     AuditService.logAsync({
       actorId: user.id,
@@ -455,7 +470,6 @@ export const AuthService = {
       status: "SUCCESS",
     });
 
-    return { resetToken: rawResetToken };
   },
 
   /** Reset password using token */
@@ -476,19 +490,29 @@ export const AuthService = {
 
     const newPasswordHash = await hashPassword(newPassword);
 
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        passwordHash: newPasswordHash,
-        resetToken: null,
-        resetTokenExpires: null,
-      },
-    });
+    await prisma.$transaction(async (tx) => {
+      const consumed = await tx.user.updateMany({
+        where: {
+          id: user.id,
+          resetToken: hashedResetToken,
+          resetTokenExpires: { gt: new Date() },
+          deletedAt: null,
+        },
+        data: {
+          passwordHash: newPasswordHash,
+          resetToken: null,
+          resetTokenExpires: null,
+        },
+      });
 
-    // Invalidate all active sessions for security
-    await prisma.session.updateMany({
-      where: { userId: user.id, isActive: true },
-      data: { isActive: false, revokedAt: new Date(), revocationReason: "PASSWORD_RESET" },
+      if (consumed.count !== 1) {
+        throw new Error("Invalid or expired password reset token. Please request a new password reset link.");
+      }
+
+      await tx.session.updateMany({
+        where: { userId: user.id, isActive: true },
+        data: { isActive: false, revokedAt: new Date(), revocationReason: "PASSWORD_RESET" },
+      });
     });
 
     AuditService.logAsync({
